@@ -118,6 +118,27 @@ export default function Home() {
   };
 
   const tokenClientRef = useRef<TokenClient | null>(null);
+  const silentAuthRef = useRef(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  // Keep container pinned to the visual viewport (handles iOS keyboard scroll)
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const update = () => {
+      if (rootRef.current) {
+        rootRef.current.style.height = `${vv.height}px`;
+        rootRef.current.style.top = `${vv.offsetTop}px`;
+      }
+    };
+    vv.addEventListener("resize", update);
+    vv.addEventListener("scroll", update);
+    update();
+    return () => {
+      vv.removeEventListener("resize", update);
+      vv.removeEventListener("scroll", update);
+    };
+  }, []);
 
   // ── Auth ──────────────────────────────────────────────────────────────────
 
@@ -128,10 +149,18 @@ export default function Home() {
       scope: "https://www.googleapis.com/auth/drive.file profile email",
       callback: async (response) => {
         if (response.error || !response.access_token) {
-          setAuthError("Sign-in failed. Please try again.");
+          if (!silentAuthRef.current) {
+            setAuthError("Sign-in failed. Please try again.");
+          }
+          // Silent re-auth failed — clear stored profile so sign-in button shows
+          localStorage.removeItem("hv:user");
+          setUser(null);
           return;
         }
+        silentAuthRef.current = false;
         const token = response.access_token;
+        const expiresAt = Date.now() + 55 * 60 * 1000; // 55 min (token lasts 60)
+        localStorage.setItem("hv:token", JSON.stringify({ token, expiresAt }));
         setAccessToken(token);
         setAuthError(null);
         try {
@@ -140,12 +169,40 @@ export default function Home() {
           });
           if (!res.ok) throw new Error();
           const info = await res.json();
-          setUser({ name: info.name, email: info.email, picture: info.picture });
+          const profile = { name: info.name, email: info.email, picture: info.picture };
+          setUser(profile);
+          localStorage.setItem("hv:user", JSON.stringify(profile));
         } catch {
           setAuthError("Signed in, but could not fetch profile.");
         }
       },
     });
+
+    // Restore token from localStorage if still valid
+    const storedToken = localStorage.getItem("hv:token");
+    const storedUser = localStorage.getItem("hv:user");
+    if (storedToken && storedUser) {
+      try {
+        const { token, expiresAt } = JSON.parse(storedToken);
+        const profile = JSON.parse(storedUser);
+        if (Date.now() < expiresAt) {
+          setUser(profile);
+          setAccessToken(token);
+          return; // token still valid, no need for silent re-auth
+        }
+      } catch { /* fall through */ }
+    }
+
+    // Token expired or missing — try silent re-auth
+    if (storedUser) {
+      try {
+        setUser(JSON.parse(storedUser));
+        silentAuthRef.current = true;
+        tokenClientRef.current!.requestAccessToken({ prompt: "" });
+      } catch {
+        localStorage.removeItem("hv:user");
+      }
+    }
   }, []);
 
   const handleSignIn = () => {
@@ -153,17 +210,28 @@ export default function Home() {
       setAuthError("Google auth is still loading — please try again.");
       return;
     }
+    silentAuthRef.current = false;
     tokenClientRef.current.requestAccessToken({ prompt: "select_account" });
   };
 
   const handleSignOut = () => {
     if (accessToken) window.google.accounts.oauth2.revoke(accessToken, () => {});
+    localStorage.removeItem("hv:user");
+    localStorage.removeItem("hv:token");
     setUser(null);
     setAccessToken(null);
     setScreen("home");
     setCurrentProject(null);
     setProjects([]);
   };
+
+  // Pre-load projects as soon as the token is available (covers silent re-auth on refresh)
+  useEffect(() => {
+    if (!accessToken) return;
+    setProjectsLoading(true);
+    listProjects(accessToken).then(setProjects).finally(() => setProjectsLoading(false));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accessToken]);
 
   // ── Navigation ────────────────────────────────────────────────────────────
 
@@ -226,7 +294,7 @@ export default function Home() {
         strategy="afterInteractive"
         onLoad={initGoogleAuth}
       />
-      <div className={`h-[100dvh] flex flex-col overflow-hidden ${settings.darkMode ? "dark bg-[#0f172a]" : "bg-slate-50"}`}>
+      <div ref={rootRef} className={`fixed inset-x-0 top-0 flex flex-col overflow-hidden ${settings.darkMode ? "dark bg-[#0f172a]" : "bg-slate-50"}`} style={{ height: "100dvh" }}>
 
         {/* Header */}
         <header className="bg-white border-b border-slate-100 px-4 py-3 flex items-center justify-between shrink-0">
@@ -792,7 +860,7 @@ function FindWordsScreen({
               {uploadStatus === "success" && uploadResult && (
                 <span className="flex items-center gap-2 bg-green-50 border border-green-200 rounded-lg px-2.5 py-1 text-xs text-green-800">
                   <span><span className="font-medium">{uploadResult.name}</span> saved</span>
-                  <button onClick={handleUnsave} className="underline underline-offset-2 hover:text-green-900 transition-colors">Undo</button>
+                  <button onMouseDown={(e) => e.preventDefault()} onClick={handleUnsave} className="underline underline-offset-2 hover:text-green-900 transition-colors">Undo</button>
                 </span>
               )}
               {uploadStatus === "exists" && uploadResult && (
@@ -804,7 +872,7 @@ function FindWordsScreen({
               <button
                 onClick={() => {
                   setShowKeyboard((k) => !k);
-                  setTimeout(() => keyboardInputRef.current?.focus(), 50);
+                  keyboardInputRef.current?.focus();
                 }}
                 title="Type with keyboard"
                 className={`w-8 h-8 flex items-center justify-center rounded-lg border transition-colors ${
@@ -841,50 +909,49 @@ function FindWordsScreen({
       </div>
 
       {/* Bottom half: Canvas or Keyboard */}
-      <div className="flex-[3] flex flex-col p-4 gap-3 min-h-0">
-        {showKeyboard ? (
-          <div className="flex-1 flex flex-col gap-3">
-            <input
-              ref={keyboardInputRef}
-              type="text"
-              value={keyboardInput}
-              onChange={(e) => setKeyboardInput(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") handleKeyboardLookup(); }}
-              placeholder="Type a word…"
-              autoCapitalize="none"
-              autoCorrect="off"
-              spellCheck={false}
-              className="w-full text-2xl font-semibold text-slate-800 text-center border-0 border-b-2 border-slate-200 focus:border-blue-400 focus:outline-none py-3 bg-transparent placeholder:text-slate-300 placeholder:font-light placeholder:text-xl"
-            />
-            <p className="text-xs text-slate-300 text-center">Press Enter or tap Look Up</p>
-          </div>
-        ) : (
+      {showKeyboard ? (
+        <div className="shrink-0 px-4 pb-4 pt-2 border-t border-slate-100">
+          <input
+            ref={keyboardInputRef}
+            type="text"
+            value={keyboardInput}
+            onChange={(e) => setKeyboardInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") handleKeyboardLookup(); }}
+            placeholder="Type a word… (Enter to look up)"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+            className="w-full text-xl font-semibold text-slate-800 text-center border-0 border-b-2 border-slate-200 focus:border-blue-400 focus:outline-none py-2 bg-transparent placeholder:text-slate-300 placeholder:font-light placeholder:text-lg"
+          />
+        </div>
+      ) : (
+        <div className="flex-[3] flex flex-col p-4 gap-3 min-h-0">
           <div className="flex-1 bg-white rounded-2xl border-2 border-slate-200 overflow-hidden">
             <DrawingCanvas ref={canvasRef} onScribble={handleScribble} />
           </div>
-        )}
-        <div className="flex gap-2 shrink-0">
-          <button
-            onClick={resetAll}
-            className="flex-1 py-3 rounded-xl border border-slate-300 text-slate-700 font-medium hover:bg-slate-100 transition-colors"
-          >
-            Clear
-          </button>
-          <button
-            onClick={showKeyboard ? handleKeyboardLookup : handleLookUp}
-            disabled={lookupStatus === "recognizing" || lookupStatus === "looking-up"}
-            className="flex-[2] py-3 rounded-xl bg-blue-600 text-white font-medium hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
-          >
-            {lookupStatus === "recognizing" ? (
-              <><Spinner />Reading…</>
-            ) : lookupStatus === "looking-up" ? (
-              <><Spinner />Looking up…</>
-            ) : (
-              "Look Up"
-            )}
-          </button>
+          <div className="flex gap-2 shrink-0">
+            <button
+              onClick={resetAll}
+              className="flex-1 py-3 rounded-xl border border-slate-300 text-slate-700 font-medium hover:bg-slate-100 transition-colors"
+            >
+              Clear
+            </button>
+            <button
+              onClick={handleLookUp}
+              disabled={lookupStatus === "recognizing" || lookupStatus === "looking-up"}
+              className="flex-[2] py-3 rounded-xl bg-blue-600 text-white font-medium hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
+            >
+              {lookupStatus === "recognizing" ? (
+                <><Spinner />Reading…</>
+              ) : lookupStatus === "looking-up" ? (
+                <><Spinner />Looking up…</>
+              ) : (
+                "Look Up"
+              )}
+            </button>
+          </div>
         </div>
-      </div>
+      )}
     </main>
   );
 }
