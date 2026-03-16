@@ -26,7 +26,7 @@ interface DictResult { word: string; phonetic?: string; meanings: Meaning[]; }
 
 type Screen = "home" | "project-select" | "find" | "study" | "manage" | "project-words";
 type LookupStatus = "idle" | "recognizing" | "looking-up" | "done" | "error";
-type UploadStatus = "idle" | "uploading" | "success" | "error";
+type UploadStatus = "idle" | "uploading" | "success" | "exists" | "error";
 
 // ── Star helpers (localStorage) ────────────────────────────────────────────────
 
@@ -737,16 +737,26 @@ function FindWordsScreen({
   useEffect(() => {
     if (lookupStatus !== "done" || !displayResult) return;
     setSaveError(null);
-    setUploadResult({ name: displayResult.word });
-    setUploadStatus("success");
+    const word = displayResult.word;
+    setUploadResult({ name: word });
     const entry: VocabEntry = {
-      word: displayResult.word,
+      word,
       meanings: displayResult.meanings,
       lang: meaningLanguage,
       addedAt: new Date().toISOString(),
     };
-    saveWordEntry(entry, accessToken, project).then(() => {
-      onProjectWordCountUpdate(project);
+    loadVocabEntries(project, accessToken).then((entries) => {
+      const alreadyExists = entries.some(
+        (e) => e.word.toLowerCase() === word.toLowerCase()
+      );
+      if (alreadyExists) {
+        setUploadStatus("exists");
+        return;
+      }
+      setUploadStatus("success");
+      return saveWordEntry(entry, accessToken, project).then(() => {
+        onProjectWordCountUpdate(project);
+      });
     }).catch((e) => {
       setSaveError(e instanceof Error ? e.message : "Save failed.");
       setUploadStatus("error");
@@ -772,36 +782,49 @@ function FindWordsScreen({
       {/* Top half: Definition */}
       <div className="flex-[2] overflow-auto border-b border-slate-100 flex flex-col">
         {/* Toolbar */}
-        <div className="flex items-center gap-2 px-4 pt-3 pb-2 shrink-0 flex-wrap">
-          <div>
-            <p className="text-xs text-slate-400">Project</p>
-            <p className="text-sm font-medium text-slate-700">{project.name}</p>
-          </div>
-          <div className="flex items-center gap-2 ml-auto">
-            {/* Keyboard toggle */}
-            <button
-              onClick={() => {
-                setShowKeyboard((k) => !k);
-                setTimeout(() => keyboardInputRef.current?.focus(), 50);
-              }}
-              title="Type with keyboard"
-              className={`w-8 h-8 flex items-center justify-center rounded-lg border transition-colors ${
-                showKeyboard ? "bg-blue-600 border-blue-600 text-white" : "border-slate-200 text-slate-400 hover:border-blue-300 hover:text-blue-500"
-              }`}
-            >
-              <svg viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
-                <path fillRule="evenodd" d="M3 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM3 10a1 1 0 011-1h6a1 1 0 110 2H4a1 1 0 01-1-1zM3 15a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clipRule="evenodd" />
-              </svg>
-            </button>
-            <select
-              value={meaningLanguage}
-              onChange={(e) => handleMeaningLanguageChange(e.target.value)}
-              className="text-sm text-slate-700 border border-slate-200 rounded-lg px-2 py-1.5 bg-white focus:outline-none focus:border-blue-400 cursor-pointer"
-            >
-              {MEANING_OPTIONS.map((opt) => (
-                <option key={opt.code} value={opt.code}>{opt.label}</option>
-              ))}
-            </select>
+        <div className="px-4 pt-3 pb-2 shrink-0">
+          <div className="flex items-center gap-2">
+            <div>
+              <p className="text-xs text-slate-400">Project</p>
+              <p className="text-sm font-medium text-slate-700">{project.name}</p>
+            </div>
+            <div className="flex items-center gap-2 ml-auto">
+              {uploadStatus === "success" && uploadResult && (
+                <span className="flex items-center gap-2 bg-green-50 border border-green-200 rounded-lg px-2.5 py-1 text-xs text-green-800">
+                  <span><span className="font-medium">{uploadResult.name}</span> saved</span>
+                  <button onClick={handleUnsave} className="underline underline-offset-2 hover:text-green-900 transition-colors">Undo</button>
+                </span>
+              )}
+              {uploadStatus === "exists" && uploadResult && (
+                <span className="flex items-center bg-slate-100 border border-slate-200 rounded-lg px-2.5 py-1 text-xs text-slate-500">
+                  <span><span className="font-medium">{uploadResult.name}</span> already saved</span>
+                </span>
+              )}
+              {/* Keyboard toggle */}
+              <button
+                onClick={() => {
+                  setShowKeyboard((k) => !k);
+                  setTimeout(() => keyboardInputRef.current?.focus(), 50);
+                }}
+                title="Type with keyboard"
+                className={`w-8 h-8 flex items-center justify-center rounded-lg border transition-colors ${
+                  showKeyboard ? "bg-blue-600 border-blue-600 text-white" : "border-slate-200 text-slate-400 hover:border-blue-300 hover:text-blue-500"
+                }`}
+              >
+                <svg viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+                  <path fillRule="evenodd" d="M3 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM3 10a1 1 0 011-1h6a1 1 0 110 2H4a1 1 0 01-1-1zM3 15a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clipRule="evenodd" />
+                </svg>
+              </button>
+              <select
+                value={meaningLanguage}
+                onChange={(e) => handleMeaningLanguageChange(e.target.value)}
+                className="text-sm text-slate-700 border border-slate-200 rounded-lg px-2 py-1.5 bg-white focus:outline-none focus:border-blue-400 cursor-pointer"
+              >
+                {MEANING_OPTIONS.map((opt) => (
+                  <option key={opt.code} value={opt.code}>{opt.label}</option>
+                ))}
+              </select>
+            </div>
           </div>
         </div>
 
@@ -813,20 +836,6 @@ function FindWordsScreen({
             result={displayResult}
             error={lookupError}
           />
-          {uploadStatus === "success" && uploadResult && (
-            <div className="bg-green-50 border border-green-200 rounded-xl px-4 py-2.5 shrink-0 flex items-center justify-between gap-3">
-              <p className="text-green-800 text-xs">
-                <span className="font-medium">{uploadResult.name}</span>{" "}
-                saved to <span className="font-medium">{project.name}</span>
-              </p>
-              <button
-                onClick={handleUnsave}
-                className="text-xs text-green-700 underline underline-offset-2 hover:text-green-900 shrink-0 transition-colors"
-              >
-                Undo
-              </button>
-            </div>
-          )}
           {saveError && <p className="text-red-500 text-xs shrink-0">{saveError}</p>}
         </div>
       </div>
